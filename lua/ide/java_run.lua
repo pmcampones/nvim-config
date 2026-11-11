@@ -218,7 +218,7 @@ end
 --- Start `cmd` in the Run panel (reusing it), with keyboard input going to the program.
 --- Maven/Gradle test totals from the output: { total, failed, skipped } or nil.
 local function parse_test_summary(lines)
-  local summary
+  local summary, console
   for _, l in ipairs(lines) do
     l = l:gsub("\27%[[%d;]*m", "") -- strip colors
     -- Maven Surefire: "Tests run: 12, Failures: 1, Errors: 0, Skipped: 2" (the last one is the total)
@@ -226,13 +226,25 @@ local function parse_test_summary(lines)
     if t then
       summary = { total = tonumber(t), failed = tonumber(f) + tonumber(e), skipped = tonumber(sk) }
     end
+    -- JUnit console launcher: "[        12 tests found           ]", "[ 1 tests failed ]"…
+    local n, what = l:match("^%[%s*(%d+) tests (%a+)%s*%]")
+    if n then
+      console = console or { total = 0, failed = 0, skipped = 0 }
+      if what == "found" then
+        console.total = tonumber(n)
+      elseif what == "failed" then
+        console.failed = tonumber(n)
+      elseif what == "skipped" or what == "aborted" then
+        console.skipped = console.skipped + tonumber(n)
+      end
+    end
     -- Gradle: "12 tests completed, 2 failed, 1 skipped"
     local gt, rest = l:match("(%d+) tests? completed(.*)")
     if gt then
       summary = { total = tonumber(gt), failed = tonumber(rest:match("(%d+) failed") or 0), skipped = tonumber(rest:match("(%d+) skipped") or 0) }
     end
   end
-  return summary
+  return console or summary
 end
 
 local function start(token, cmd, cwd, title, kind)
@@ -639,6 +651,104 @@ local function is_test_annotation(line)
   return false
 end
 
+--------------------------------------------------------------------------------
+-- Test class inheritance (abstract test suites run through their subclasses)
+--------------------------------------------------------------------------------
+
+--- Name, abstract?, superclass (simple name) of the top-level class in Java source text.
+local function class_header(text)
+  for mods, name, rest in text:gmatch("([%w%s]*)%f[%w]class%s+([%w_]+)([^{]*){") do
+    if not mods:find("%f[%w]private%f[%W]") then
+      local super = rest:match("extends%s+([%w_.]+)")
+      return name, mods:find("%f[%w]abstract%f[%W]") ~= nil, super and super:match("([%w_]+)$")
+    end
+  end
+end
+
+local function own_tests(text)
+  for line in (text .. "\n"):gmatch("(.-)\n") do
+    if is_test_annotation(line) then
+      return true
+    end
+  end
+  return false
+end
+
+local INDEX_SKIP = { target = true, build = true, out = true, bin = true, node_modules = true, [".git"] = true, [".idea"] = true, [".gradle"] = true }
+local index_cache = {} -- project root -> { time, classes }
+
+--- All classes of a project: simple name -> list of { path, name, abstract, super, tests }.
+--- Cached for a few seconds (menus ask several times per right-click).
+local function project_index(root)
+  local cached = index_cache[root]
+  if cached and vim.uv.now() - cached.time < 5000 then
+    return cached.classes
+  end
+  local classes, scanned = {}, 0
+  for name, kind in vim.fs.dir(root, { depth = 30, skip = function(d) return not INDEX_SKIP[vim.fs.basename(d)] end }) do
+    if kind == "file" and name:match("%.java$") then
+      scanned = scanned + 1
+      if scanned > 8000 then
+        break
+      end
+      local path = root .. "/" .. name
+      local text = strip_comments(file_lines(path))
+      local cname, abstract, super = class_header(text)
+      if cname then
+        classes[cname] = classes[cname] or {}
+        table.insert(classes[cname], { path = path, name = cname, abstract = abstract, super = super, tests = own_tests(text) })
+      end
+    end
+  end
+  index_cache[root] = { time = vim.uv.now(), classes = classes }
+  return classes
+end
+
+local function project_root_of(path)
+  local found = vim.fs.find({ "pom.xml", "build.gradle", "build.gradle.kts", ".git" }, { path = vim.fn.fnamemodify(path, ":h"), upward = true })[1]
+  return found and vim.fn.fnamemodify(found, ":h") or vim.fn.fnamemodify(path, ":h")
+end
+
+--- Whether a class (or one of its superclasses in the project) has test methods.
+local function inherits_tests(classes, super, depth)
+  depth = depth or 0
+  if not super or depth > 20 then
+    return false
+  end
+  for _, c in ipairs(classes[super] or {}) do
+    if c.tests or inherits_tests(classes, c.super, depth + 1) then
+      return true
+    end
+  end
+  return false
+end
+
+--- Concrete (non-abstract) subclasses of `name`, at any depth.
+local function implementations(classes, name)
+  local result, seen = {}, {}
+  local function walk(parent, depth)
+    if depth > 20 then
+      return
+    end
+    for _, list in pairs(classes) do
+      for _, c in ipairs(list) do
+        if c.super == parent and not seen[c.path] then
+          seen[c.path] = true
+          if not c.abstract then
+            table.insert(result, c)
+          end
+          walk(c.name, depth + 1)
+        end
+      end
+    end
+  end
+  walk(name, 0)
+  table.sort(result, function(a, b)
+    return a.path < b.path
+  end)
+  return result
+end
+
 --- For a Java file with JUnit tests: { class = "DPTest", method = "testX" | nil }.
 --- `cursor` (1-based line) picks the test method the cursor is in, if any.
 function M.test_info(path, lines, cursor)
@@ -647,17 +757,20 @@ function M.test_info(path, lines, cursor)
   end
   lines = lines or file_lines(path)
   local text = strip_comments(lines)
-  local has_test = false
-  for line in (text .. "\n"):gmatch("(.-)\n") do
-    if is_test_annotation(line) then
-      has_test = true
-      break
+  local has_test = own_tests(text)
+  local cname, abstract, super = class_header(text)
+  if not has_test then
+    -- a subclass that only inherits its tests (e.g. JavaUsersTests extends UsersTests)
+    if not super or abstract or not inherits_tests(project_index(project_root_of(path)), super) then
+      return nil
     end
   end
-  if not has_test then
-    return nil
-  end
   local info = { class = vim.fn.fnamemodify(path, ":t:r") }
+  if abstract then
+    -- abstract test suite: JUnit can't run it directly, its concrete subclasses run its tests
+    info.abstract = true
+    info.implementations = implementations(project_index(project_root_of(path)), cname or info.class)
+  end
   if cursor then
     local code = vim.split(text, "\n")
     if code[cursor] and is_test_annotation(code[cursor]) then -- on the @Test line: method is just below
@@ -695,7 +808,112 @@ end
 
 --- Run the JUnit tests of a test class (or one test method) with Maven or Gradle.
 --- Run JUnit tests with Maven or Gradle. `selectors`: "pkg.Class" or "pkg.Class#method".
-local function run_test_selection(selectors, start_dir, title, rerun)
+--------------------------------------------------------------------------------
+-- Tests Maven doesn't know about (e.g. a test/ folder outside src/test/java)
+--------------------------------------------------------------------------------
+
+local CONSOLE_VERSION = "1.11.4" -- JUnit Platform Console Launcher (runs JUnit 5 and JUnit 4 tests)
+
+local function m2_jar(group, artifact, version)
+  return ("%s/.m2/repository/%s/%s/%s/%s-%s.jar"):format(vim.env.HOME, group:gsub("%.", "/"), artifact, version, artifact, version)
+end
+
+--- Maven's test source folder (absolute) and whether the pom declares JUnit.
+local function maven_test_setup(root)
+  local ok, pom = pcall(vim.fn.readfile, root .. "/pom.xml")
+  local text = ok and table.concat(pom, "\n") or ""
+  local dir = text:match("<testSourceDirectory>%s*(.-)%s*</testSourceDirectory>") or "src/test/java"
+  dir = dir:gsub("%${project%.basedir}/?", "")
+  if not dir:match("^/") then
+    dir = root .. "/" .. dir
+  end
+  return vim.fs.normalize(dir), text:find("junit", 1, true) ~= nil
+end
+
+local function under(path, dir)
+  return path:sub(1, #dir + 1) == dir .. "/"
+end
+
+--- A bash script that compiles the main code with Maven, compiles the test folder(s) with
+--- javac and runs the selected tests with the JUnit console launcher.
+local function direct_test_script(root, mvn, tests)
+  local work = vim.fn.stdpath("cache") .. "/ide-tests/" .. vim.fn.sha256(root):sub(1, 12)
+  vim.fn.mkdir(work, "p")
+  local roots, seen, junit4 = {}, {}, false
+  for _, t in ipairs(tests) do
+    local lines = file_lines(t.path)
+    local r = M.source_root(t.path, lines) or vim.fn.fnamemodify(t.path, ":h")
+    if not seen[r] then
+      seen[r] = true
+      table.insert(roots, r)
+    end
+    if table.concat(lines, "\n"):find("import%s+org%.junit%.[A-Z]") or table.concat(lines, "\n"):find("import%s+org%.junit%.Test") then
+      junit4 = true
+    end
+  end
+  local selectors = {}
+  for _, t in ipairs(tests) do
+    if t.method then
+      table.insert(selectors, "--select-method " .. vim.fn.shellescape(t.fqcn .. "#" .. t.method))
+    else
+      table.insert(selectors, "--select-class " .. vim.fn.shellescape(t.fqcn))
+    end
+  end
+  local q = vim.fn.shellescape
+  local console = m2_jar("org.junit.platform", "junit-platform-console-standalone", CONSOLE_VERSION)
+  local junit4_jars = { m2_jar("junit", "junit", "4.13.2"), m2_jar("org.hamcrest", "hamcrest-core", "1.3") }
+  local lines = {
+    "#!/usr/bin/env bash",
+    "# generated by ~/.config/nvim/lua/ide/java_run.lua: run JUnit tests Maven doesn't compile",
+    "set -e",
+    "cd " .. q(root),
+    "WORK=" .. q(work),
+    "MVN=" .. q(mvn),
+    "CONSOLE=" .. q(console),
+    'step() { printf "\\n\\033[1;34m▶ %s\\033[0m\\n" "$1"; }',
+    'if [ ! -f "$CONSOLE" ]; then',
+    '  step "Downloading the JUnit console launcher (only the first time)…"',
+    '  "$MVN" -q dependency:get -Dartifact=org.junit.platform:junit-platform-console-standalone:' .. CONSOLE_VERSION .. " -Dtransitive=false",
+    "fi",
+    "EXTRA=",
+  }
+  if junit4 then
+    vim.list_extend(lines, {
+      "J4=" .. q(junit4_jars[1]) .. "; HC=" .. q(junit4_jars[2]),
+      'if ! grep -q "<artifactId>junit</artifactId>" pom.xml; then  # JUnit 4 tests, but the pom has no JUnit 4',
+      '  if [ ! -f "$J4" ] || [ ! -f "$HC" ]; then',
+      '    step "Downloading JUnit 4 (only the first time)…"',
+      '    "$MVN" -q dependency:get -Dartifact=junit:junit:4.13.2',
+      "  fi",
+      '  EXTRA="$J4:$HC"',
+      "fi",
+    })
+  end
+  vim.list_extend(lines, {
+    'step "Compiling the project and resolving its dependencies (Maven)…"',
+    '"$MVN" -q compile dependency:build-classpath -Dmdep.outputFile="$WORK/cp.txt" -Dmdep.includeScope=test',
+    "# JUnit 5 jars come with the console launcher; drop the project's copies to avoid version clashes",
+    "CP=$(tr ':' '\\n' < \"$WORK/cp.txt\" | grep -v -E '/org/junit/(platform|jupiter)/|/org/opentest4j/|/org/apiguardian/' | paste -sd: -)",
+    'CP="target/classes${CP:+:$CP}${EXTRA:+:$EXTRA}"',
+    'step "Compiling the tests…"',
+    'rm -rf "$WORK/test-classes" && mkdir -p "$WORK/test-classes"',
+    "find " .. table.concat(vim.tbl_map(q, roots), " ") .. " -name '*.java' > \"$WORK/sources.txt\"",
+    'javac -nowarn -encoding UTF-8 -d "$WORK/test-classes" -cp "$CP:$CONSOLE" @"$WORK/sources.txt"',
+    "# resources (non-.java files) of the test folders, like Maven's test resources",
+    "for r in " .. table.concat(vim.tbl_map(q, roots), " ") .. '; do (cd "$r" && find . -type f ! -name "*.java" -exec cp --parents {} "$WORK/test-classes/" \\; 2>/dev/null) || true; done',
+    'step "Running the tests…"',
+    'set +e',
+    'java -jar "$CONSOLE" execute --disable-banner --details=tree --class-path "$WORK/test-classes:$CP" ' .. table.concat(selectors, " "),
+  })
+  local script = work .. "/run-tests.sh"
+  vim.fn.writefile(lines, script)
+  return script
+end
+
+--- Run JUnit tests. `tests`: list of { path, fqcn, method? }. Tests in Maven's test folder run
+--- with `mvn test`; tests elsewhere (e.g. a test/ folder IntelliJ knows about but the pom
+--- doesn't) are compiled and run directly with the JUnit console launcher.
+local function run_test_selection(tests, start_dir, title, rerun)
   run.rerun = rerun
   vim.cmd("silent! wall")
   local token = prepare(title)
@@ -705,13 +923,27 @@ local function run_test_selection(selectors, start_dir, title, rerun)
   if not root then
     return fail(token, "Running tests needs a Maven (pom.xml) or Gradle (build.gradle) project.")
   end
+  local selectors = vim.tbl_map(function(t)
+    return t.fqcn .. (t.method and ("#" .. t.method) or "")
+  end, tests)
   local cmd
   if build == "pom.xml" then
     local mvn = vim.uv.fs_stat(root .. "/mvnw") and "./mvnw" or "mvn"
     if mvn == "mvn" and vim.fn.executable("mvn") == 0 then
       return fail(token, "Maven (mvn) isn't installed.")
     end
-    cmd = { mvn, "test", "-Dtest=" .. table.concat(selectors, ","), "-Dsurefire.failIfNoSpecifiedTests=false" }
+    local test_dir, has_junit = maven_test_setup(root)
+    local outside = vim.tbl_filter(function(t)
+      return not under(t.path, test_dir)
+    end, tests)
+    if #outside > 0 or not has_junit then
+      status(token, ("These tests aren't in Maven's test folder (%s)%s,")
+        :format(vim.fn.fnamemodify(test_dir, ":~:."), has_junit and "" or " and the pom has no JUnit"))
+      status(token, "so they're compiled and run directly with the JUnit console launcher (like IntelliJ does).")
+      cmd = { "bash", direct_test_script(root, mvn, tests) }
+    else
+      cmd = { mvn, "test", "-Dtest=" .. table.concat(selectors, ","), "-Dsurefire.failIfNoSpecifiedTests=false" }
+    end
   else
     local gradle = vim.uv.fs_stat(root .. "/gradlew") and "./gradlew" or "gradle"
     if gradle == "gradle" and vim.fn.executable("gradle") == 0 then
@@ -736,11 +968,22 @@ function M.run_tests(path, method)
   if not info then
     return notify(("%s has no JUnit tests"):format(vim.fn.fnamemodify(path, ":t")), vim.log.levels.WARN)
   end
-  local fqcn = M.class_name(path, file_lines(path))
-  run_test_selection({ fqcn .. (method and ("#" .. method) or "") }, vim.fn.fnamemodify(path, ":h"),
-    method and (info.class .. "." .. method .. "()") or info.class, function()
-      M.run_tests(path, method)
-    end)
+  local tests, title
+  if info.abstract then
+    if #info.implementations == 0 then
+      return notify(("%s is abstract and has no subclasses to run its tests"):format(info.class), vim.log.levels.WARN)
+    end
+    tests = vim.tbl_map(function(c)
+      return { path = c.path, fqcn = M.class_name(c.path, file_lines(c.path)), method = method }
+    end, info.implementations)
+    title = ("%s%s in %d implementation%s"):format(info.class, method and ("." .. method .. "()") or "", #tests, #tests == 1 and "" or "s")
+  else
+    tests = { { path = path, fqcn = M.class_name(path, file_lines(path)), method = method } }
+    title = method and (info.class .. "." .. method .. "()") or info.class
+  end
+  run_test_selection(tests, vim.fn.fnamemodify(path, ":h"), title, function()
+    M.run_tests(path, method)
+  end)
 end
 
 local SKIP_DIRS = { target = true, build = true, out = true, bin = true, node_modules = true, [".git"] = true, [".idea"] = true, [".gradle"] = true }
@@ -759,7 +1002,8 @@ function M.tests_in_dir(dir, first_only)
       scanned = scanned + 1
       local path = dir .. "/" .. name
       local lines = file_lines(path)
-      if M.test_info(path, lines) then
+      local info = M.test_info(path, lines)
+      if info and not info.abstract then -- abstract suites run through their subclasses
         table.insert(found, { path = path, fqcn = M.class_name(path, lines) })
         if first_only then
           break
@@ -783,10 +1027,7 @@ function M.run_dir_tests(dir)
   if #tests == 0 then
     return notify(("No JUnit tests in %s"):format(vim.fn.fnamemodify(dir, ":t")), vim.log.levels.WARN)
   end
-  local selectors = vim.tbl_map(function(t)
-    return t.fqcn
-  end, tests)
-  run_test_selection(selectors, dir, ("all in '%s' (%d class%s)"):format(vim.fn.fnamemodify(dir, ":t"), #tests, #tests == 1 and "" or "es"), function()
+  run_test_selection(tests, dir, ("all in '%s' (%d class%s)"):format(vim.fn.fnamemodify(dir, ":t"), #tests, #tests == 1 and "" or "es"), function()
     M.run_dir_tests(dir)
   end)
 end

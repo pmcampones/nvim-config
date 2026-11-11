@@ -107,7 +107,9 @@ local function update_run_item(node)
     tests = { class = vim.fn.fnamemodify(node.path, ":t") }
   end
   if tests then
-    local label = dir_has_tests and "Run All Tests in '%s'" or "Run Tests in '%s'"
+    local label = dir_has_tests and "Run All Tests in '%s'"
+      or tests.abstract and ("Run Tests in '%s' (" .. #tests.implementations .. " implementations)")
+      or "Run Tests in '%s'"
     test_item = "]NeoTree.▶\\ " .. label:format(tests.class):gsub("[%s%.\\]", "\\%0")
     vim.cmd(("anoremenu 1.02 %s <Cmd>lua NeotreeContextTests()<CR>"):format(test_item))
     vim.cmd("anoremenu 1.1 ]NeoTree.-run-sep- <Nop>")

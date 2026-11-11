@@ -45,7 +45,8 @@ vim.api.nvim_create_autocmd("MenuPopup", {
         vim.cmd(("anoremenu 1.02 %s <Cmd>lua IdeRunJavaTests(%q)<CR>"):format(item, tests.method))
         table.insert(TEST_ITEMS, item)
       end
-      local item = "PopUp." .. menu_name(("▶ Run Tests in '%s'"):format(tests.class))
+      local suffix = tests.abstract and (" (%d implementations)"):format(#tests.implementations) or ""
+      local item = "PopUp." .. menu_name(("▶ Run Tests in '%s'%s"):format(tests.class, suffix))
       vim.cmd(("anoremenu 1.03 %s <Cmd>lua IdeRunJavaTests('')<CR>"):format(item))
       table.insert(TEST_ITEMS, item)
       vim.cmd("anoremenu 1.1 " .. SEP .. " <Nop>")
