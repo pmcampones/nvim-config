@@ -11,12 +11,12 @@ local function menu_name(text)
   return (text:gsub("[%s%.\\]", "\\%0"))
 end
 
-_G.IdeRunJavaTests = function(method)
-  require("ide.java_run").run_tests(vim.api.nvim_buf_get_name(0), method ~= "" and method or nil)
+_G.IdeRunJavaTests = function(method, profile)
+  require("ide.java_run").run_tests(vim.api.nvim_buf_get_name(0), method ~= "" and method or nil, profile and { profile = true } or nil)
 end
 
-_G.IdeRunCurrentJava = function()
-  require("ide.java_run").run(vim.api.nvim_buf_get_name(0))
+_G.IdeRunCurrentJava = function(profile)
+  require("ide.java_run").run(vim.api.nvim_buf_get_name(0), profile and { profile = true } or nil)
 end
 
 vim.api.nvim_create_autocmd("MenuPopup", {
@@ -34,6 +34,9 @@ vim.api.nvim_create_autocmd("MenuPopup", {
       -- "Main.main()" from starting a submenu)
       ITEM = ("PopUp.▶\\ Run\\ '%s\\.main()'"):format(name)
       vim.cmd(("anoremenu 1 %s <Cmd>lua IdeRunCurrentJava()<CR>"):format(ITEM))
+      local profile_item = "PopUp." .. menu_name(("◉ Profile '%s.main()'"):format(name))
+      vim.cmd(("anoremenu 1.01 %s <Cmd>lua IdeRunCurrentJava(true)<CR>"):format(profile_item))
+      table.insert(TEST_ITEMS, profile_item)
       vim.cmd("anoremenu 1.1 " .. SEP .. " <Nop>")
     end
     -- JUnit: the test method under the cursor, and the whole class
@@ -44,11 +47,17 @@ vim.api.nvim_create_autocmd("MenuPopup", {
         local item = "PopUp." .. menu_name(("▶ Run Test '%s()'"):format(tests.method))
         vim.cmd(("anoremenu 1.02 %s <Cmd>lua IdeRunJavaTests(%q)<CR>"):format(item, tests.method))
         table.insert(TEST_ITEMS, item)
+        local pitem = "PopUp." .. menu_name(("◉ Profile Test '%s()'"):format(tests.method))
+        vim.cmd(("anoremenu 1.025 %s <Cmd>lua IdeRunJavaTests(%q, true)<CR>"):format(pitem, tests.method))
+        table.insert(TEST_ITEMS, pitem)
       end
       local suffix = tests.abstract and (" (%d implementations)"):format(#tests.implementations) or ""
       local item = "PopUp." .. menu_name(("▶ Run Tests in '%s'%s"):format(tests.class, suffix))
       vim.cmd(("anoremenu 1.03 %s <Cmd>lua IdeRunJavaTests('')<CR>"):format(item))
       table.insert(TEST_ITEMS, item)
+      local pitem = "PopUp." .. menu_name(("◉ Profile Tests in '%s'%s"):format(tests.class, suffix))
+      vim.cmd(("anoremenu 1.035 %s <Cmd>lua IdeRunJavaTests('', true)<CR>"):format(pitem))
+      table.insert(TEST_ITEMS, pitem)
       vim.cmd("anoremenu 1.1 " .. SEP .. " <Nop>")
     end
   end,

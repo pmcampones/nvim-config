@@ -8,7 +8,8 @@
 --   Create Git Repository… (folders outside a repository), Set Git Remote…, Push
 -- In the editor: "Show Git Diff" / "Rollback to Last Commit…" in Neovim's right-click menu.
 -- In the Commit tab: Stage / Unstage / Show Diff / Rollback / Copy Path.
---   ▶ Run 'Main.main()' for Java files with a main method (lua/ide/java_run.lua)
+--   ▶ Run / ◉ Profile 'Main.main()' for Java files with a main method, and ▶ Run / ◉ Profile
+--   Tests for JUnit test files and folders (lua/ide/java_run.lua, lua/ide/profiler.lua)
 -- In the Git Log panel: right-click a commit to check it out (see lua/ide/gitlog.lua).
 -- Right-clicking anywhere else keeps Neovim's normal right-click menu.
 
@@ -72,53 +73,60 @@ vim.cmd([[
 
 -- "▶ Run 'Main.main()'" at the top of the menu for Java files with a main method
 -- (lua/ide/java_run.lua).
-local run_item -- name of the item currently in the menu
-local test_item
-_G.NeotreeContextTests = function()
+local run_items = {} -- Run / Profile items currently in the menu
+
+--- opts: nil (run) or { profile = true }
+_G.NeotreeContextTests = function(profile)
   local node = target_state and target_state.tree:get_node()
+  local opts = profile and { profile = true } or nil
   if node and node.path then
     if node.type == "directory" then
-      require("ide.java_run").run_dir_tests(node.path)
+      require("ide.java_run").run_dir_tests(node.path, opts)
     else
-      require("ide.java_run").run_tests(node.path)
+      require("ide.java_run").run_tests(node.path, nil, opts)
     end
   end
 end
-_G.NeotreeContextRun = function()
+_G.NeotreeContextRun = function(profile)
   local node = target_state and target_state.tree:get_node()
   if node and node.path then
-    require("ide.java_run").run(node.path)
+    require("ide.java_run").run(node.path, profile and { profile = true } or nil)
   end
 end
+
+local function menu_text(text)
+  return (text:gsub("[%s%.\\]", "\\%0"))
+end
+
 local function update_run_item(node)
-  if run_item then
-    pcall(vim.cmd.aunmenu, run_item)
-    run_item = nil
+  for _, item in ipairs(run_items) do
+    pcall(vim.cmd.aunmenu, item)
   end
-  if test_item then
-    pcall(vim.cmd.aunmenu, test_item)
-    test_item = nil
-  end
+  run_items = {}
   pcall(vim.cmd.aunmenu, "]NeoTree.-run-sep-")
-  local tests = node and node.type == "file" and require("ide.java_run").test_info(node.path)
-  local dir_has_tests = node and node.type == "directory" and node.path
-    and #require("ide.java_run").tests_in_dir(node.path, true) > 0
+  local function add(priority, text, rhs)
+    local item = "]NeoTree." .. menu_text(text)
+    vim.cmd(("anoremenu %s %s <Cmd>lua %s<CR>"):format(priority, item, rhs))
+    table.insert(run_items, item)
+    vim.cmd("anoremenu 1.1 ]NeoTree.-run-sep- <Nop>")
+  end
+  local jr = require("ide.java_run")
+  local name = node and node.type == "file" and jr.runnable(node.path)
+  if name then
+    add("1", ("▶ Run '%s.main()'"):format(name), "NeotreeContextRun()")
+    add("1.01", ("◉ Profile '%s.main()'"):format(name), "NeotreeContextRun(true)")
+  end
+  local tests = node and node.type == "file" and jr.test_info(node.path)
+  local dir_has_tests = node and node.type == "directory" and node.path and #jr.tests_in_dir(node.path, true) > 0
   if dir_has_tests then
     tests = { class = vim.fn.fnamemodify(node.path, ":t") }
   end
   if tests then
-    local label = dir_has_tests and "Run All Tests in '%s'"
-      or tests.abstract and ("Run Tests in '%s' (" .. #tests.implementations .. " implementations)")
-      or "Run Tests in '%s'"
-    test_item = "]NeoTree.▶\\ " .. label:format(tests.class):gsub("[%s%.\\]", "\\%0")
-    vim.cmd(("anoremenu 1.02 %s <Cmd>lua NeotreeContextTests()<CR>"):format(test_item))
-    vim.cmd("anoremenu 1.1 ]NeoTree.-run-sep- <Nop>")
-  end
-  local name = node and node.type == "file" and require("ide.java_run").runnable(node.path)
-  if name then
-    run_item = ("]NeoTree.▶\\ Run\\ '%s\\.main()'"):format(name) -- "\\." = a literal dot
-    vim.cmd(("anoremenu 1 %s <Cmd>lua NeotreeContextRun()<CR>"):format(run_item))
-    vim.cmd("anoremenu 1.1 ]NeoTree.-run-sep- <Nop>")
+    local what = dir_has_tests and ("All Tests in '%s'"):format(tests.class)
+      or tests.abstract and ("Tests in '%s' (%d implementations)"):format(tests.class, #tests.implementations)
+      or ("Tests in '%s'"):format(tests.class)
+    add("1.02", "▶ Run " .. what, "NeotreeContextTests()")
+    add("1.03", "◉ Profile " .. what, "NeotreeContextTests(true)")
   end
 end
 

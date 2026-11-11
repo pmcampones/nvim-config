@@ -90,9 +90,15 @@ _G.IdeRunClose = function()
   vim.schedule(M.close)
 end
 
+_G.IdeRunFlame = function()
+  vim.schedule(function()
+    require("ide.profiler").show(run.profile)
+  end)
+end
+
 _G.IdeRunWinbar = function()
   local title = run.title or ""
-  local label = run.kind == "test" and " TESTS " or " RUN "
+  local label = (run.kind == "test" and " TESTS" or " RUN") .. (run.profile and " ◉ PROFILING " or " ")
   if run.preparing then
     return ("%%#Title#" .. label .. "%%*%%#Special#%s%%* %%#DiagnosticWarn# ⏳ preparing… %ds %%*%%=%%#Special#%%@v:lua.IdeRunClose@ ✕ Cancel %%X%%*")
       :format(title, math.floor((vim.uv.now() - run.t0) / 1000))
@@ -119,6 +125,7 @@ _G.IdeRunWinbar = function()
   end
   return ("%%#Title#" .. label .. "%%*%%#Special#%s%%* %s%%=%%#DiagnosticOk#%%@v:lua.IdeRunRerun@ ⟳ Rerun %%X%%*"):format(title, status)
     .. (running and "%#DiagnosticError#%@v:lua.IdeRunStop@ ■ Stop %X%*" or "")
+    .. ((run.profile and run.profile.ready) and "%#WarningMsg#%@v:lua.IdeRunFlame@ 🔥 Flame Graph %X%*" or "")
     .. "%#Special#%@v:lua.IdeRunClose@ ✕ Close %X%*"
 end
 
@@ -171,6 +178,7 @@ local function prepare(title)
   M.stop()
   run.token = (run.token or 0) + 1
   run.preparing, run.title, run.exit_code, run.t0, run.job, run.kind = true, title, nil, vim.uv.now(), nil, nil
+  run.profile = nil
   local buf = vim.api.nvim_create_buf(false, true)
   vim.bo[buf].bufhidden = "wipe"
   show_in_panel(buf)
@@ -257,6 +265,7 @@ local function start(token, cmd, cwd, title, kind)
   vim.bo[buf].bufhidden = "wipe"
   show_in_panel(buf)
   run.title, run.exit_code, run.kind, run.test_summary = title, nil, kind, nil
+  run.job_profile = run.profile
   vim.api.nvim_set_current_win(run.win)
   vim.api.nvim_buf_call(buf, function()
     run.job = vim.fn.jobstart(cmd, {
@@ -267,6 +276,14 @@ local function start(token, cmd, cwd, title, kind)
           run.test_summary = parse_test_summary(vim.api.nvim_buf_get_lines(buf, 0, -1, false))
         end
         run.exit_code = code
+        if run.profile and run.job_profile == run.profile then
+          local profile = run.profile
+          vim.schedule(function()
+            require("ide.profiler").finish(profile, function()
+              vim.cmd.redrawstatus({ bang = true })
+            end)
+          end)
+        end
         vim.schedule(function()
           -- leave typing mode so the next key doesn't close the output (Neovim prints
           -- "[Process exited N]" itself)
@@ -490,10 +507,15 @@ local function sep()
   return package.config:sub(1, 1) == "\\" and ";" or ":"
 end
 
+--- JVM options for the current run (the profiler's when profiling).
+local function jvm_flags()
+  return run.profile and run.profile.jvm_flags or {}
+end
+
 local function run_with_source_launcher(token, path, cls, why)
   status(token, why, "DiagnosticWarn")
   status(token, "Running with Java's source launcher instead (only the JDK, no project dependencies).", "DiagnosticWarn")
-  start(token, { "java", path }, vim.fn.fnamemodify(path, ":h"), cls)
+  start(token, vim.list_extend(vim.list_extend({ "java" }, jvm_flags()), { path }), vim.fn.fnamemodify(path, ":h"), cls)
 end
 
 --- Errors jdtls reported, as "File.java:12: message" lines (at most `max`).
@@ -543,7 +565,7 @@ local function run_with_jdtls(token, client, bufnr, path, cls)
               if err2 or not resp then
                 return run_with_source_launcher(token, path, cls, "Couldn't get the project classpath from jdtls.")
               end
-              local cmd = { "java" }
+              local cmd = vim.list_extend({ "java" }, jvm_flags())
               if resp.modulepaths and #resp.modulepaths > 0 then
                 vim.list_extend(cmd, { "--module-path", table.concat(resp.modulepaths, sep()) })
               end
@@ -573,7 +595,9 @@ local function run_with_jdtls(token, client, bufnr, path, cls)
 end
 
 --- Run the main() of the Java file at `path`.
-function M.run(path)
+--- Run main(). opts.profile: record a CPU profile and show its flame graph afterwards.
+function M.run(path, opts)
+  opts = opts or {}
   path = vim.fn.fnamemodify(path, ":p")
   local name, lines = M.runnable(path)
   if not name then
@@ -581,11 +605,15 @@ function M.run(path)
   end
   run.last = path
   run.rerun = function()
-    M.run(path)
+    M.run(path, opts)
   end
   local cls = M.class_name(path, lines)
   vim.cmd("silent! wall") -- run what's on screen
   local token = prepare(cls)
+  if opts.profile then
+    local root = vim.fs.root(path, { "pom.xml", "build.gradle", "build.gradle.kts", ".git" }) or vim.fn.fnamemodify(path, ":h")
+    run.profile = require("ide.profiler").new(root, cls)
+  end
 
   local bufnr = vim.fn.bufadd(path)
   local client = jdtls_client(bufnr) or vim.lsp.get_clients({ name = "jdtls" })[1]
@@ -836,7 +864,7 @@ end
 
 --- A bash script that compiles the main code with Maven, compiles the test folder(s) with
 --- javac and runs the selected tests with the JUnit console launcher.
-local function direct_test_script(root, mvn, tests)
+local function direct_test_script(root, mvn, tests, flags)
   local work = vim.fn.stdpath("cache") .. "/ide-tests/" .. vim.fn.sha256(root):sub(1, 12)
   vim.fn.mkdir(work, "p")
   local roots, seen, junit4 = {}, {}, false
@@ -903,7 +931,7 @@ local function direct_test_script(root, mvn, tests)
     "for r in " .. table.concat(vim.tbl_map(q, roots), " ") .. '; do (cd "$r" && find . -type f ! -name "*.java" -exec cp --parents {} "$WORK/test-classes/" \\; 2>/dev/null) || true; done',
     'step "Running the tests…"',
     'set +e',
-    'java -jar "$CONSOLE" execute --disable-banner --details=tree --class-path "$WORK/test-classes:$CP" ' .. table.concat(selectors, " "),
+    "java " .. table.concat(vim.tbl_map(vim.fn.shellescape, flags or {}), " ") .. ' -jar "$CONSOLE" execute --disable-banner --details=tree --class-path "$WORK/test-classes:$CP" ' .. table.concat(selectors, " "),
   })
   local script = work .. "/run-tests.sh"
   vim.fn.writefile(lines, script)
@@ -913,11 +941,15 @@ end
 --- Run JUnit tests. `tests`: list of { path, fqcn, method? }. Tests in Maven's test folder run
 --- with `mvn test`; tests elsewhere (e.g. a test/ folder IntelliJ knows about but the pom
 --- doesn't) are compiled and run directly with the JUnit console launcher.
-local function run_test_selection(tests, start_dir, title, rerun)
+local function run_test_selection(tests, start_dir, title, rerun, profile)
   run.rerun = rerun
   vim.cmd("silent! wall")
   local token = prepare(title)
   run.kind = "test"
+  if profile then
+    local root0 = find_up(start_dir, { "pom.xml", "build.gradle", "build.gradle.kts" }) or start_dir
+    run.profile = require("ide.profiler").new(root0, title)
+  end
 
   local root, build = find_up(start_dir, { "pom.xml", "build.gradle", "build.gradle.kts" })
   if not root then
@@ -940,9 +972,12 @@ local function run_test_selection(tests, start_dir, title, rerun)
       status(token, ("These tests aren't in Maven's test folder (%s)%s,")
         :format(vim.fn.fnamemodify(test_dir, ":~:."), has_junit and "" or " and the pom has no JUnit"))
       status(token, "so they're compiled and run directly with the JUnit console launcher (like IntelliJ does).")
-      cmd = { "bash", direct_test_script(root, mvn, tests) }
+      cmd = { "bash", direct_test_script(root, mvn, tests, jvm_flags()) }
     else
       cmd = { mvn, "test", "-Dtest=" .. table.concat(selectors, ","), "-Dsurefire.failIfNoSpecifiedTests=false" }
+      if run.profile then -- Surefire passes argLine to the JVM that runs the tests
+        table.insert(cmd, "-DargLine=" .. table.concat(jvm_flags(), " "))
+      end
     end
   else
     local gradle = vim.uv.fs_stat(root .. "/gradlew") and "./gradlew" or "gradle"
@@ -962,7 +997,8 @@ local function run_test_selection(tests, start_dir, title, rerun)
 end
 
 --- Run the JUnit tests of a test class (or one test method).
-function M.run_tests(path, method)
+function M.run_tests(path, method, opts)
+  opts = opts or {}
   path = vim.fn.fnamemodify(path, ":p")
   local info = M.test_info(path)
   if not info then
@@ -982,8 +1018,8 @@ function M.run_tests(path, method)
     title = method and (info.class .. "." .. method .. "()") or info.class
   end
   run_test_selection(tests, vim.fn.fnamemodify(path, ":h"), title, function()
-    M.run_tests(path, method)
-  end)
+    M.run_tests(path, method, opts)
+  end, opts.profile)
 end
 
 local SKIP_DIRS = { target = true, build = true, out = true, bin = true, node_modules = true, [".git"] = true, [".idea"] = true, [".gradle"] = true }
@@ -1021,15 +1057,16 @@ function M.tests_in_dir(dir, first_only)
 end
 
 --- Run every JUnit test class in a folder (and its subfolders).
-function M.run_dir_tests(dir)
+function M.run_dir_tests(dir, opts)
+  opts = opts or {}
   dir = vim.fn.fnamemodify(dir, ":p"):gsub("/$", "")
   local tests = M.tests_in_dir(dir)
   if #tests == 0 then
     return notify(("No JUnit tests in %s"):format(vim.fn.fnamemodify(dir, ":t")), vim.log.levels.WARN)
   end
   run_test_selection(tests, dir, ("all in '%s' (%d class%s)"):format(vim.fn.fnamemodify(dir, ":t"), #tests, #tests == 1 and "" or "es"), function()
-    M.run_dir_tests(dir)
-  end)
+    M.run_dir_tests(dir, opts)
+  end, opts.profile)
 end
 
 return M
