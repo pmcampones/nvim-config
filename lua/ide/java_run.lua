@@ -78,8 +78,8 @@ end
 
 _G.IdeRunRerun = function()
   vim.schedule(function()
-    if run.last then
-      M.run(run.last)
+    if run.rerun then
+      run.rerun()
     end
   end)
 end
@@ -92,19 +92,32 @@ end
 
 _G.IdeRunWinbar = function()
   local title = run.title or ""
+  local label = run.kind == "test" and " TESTS " or " RUN "
   if run.preparing then
-    return ("%%#Title# RUN %%*%%#Special#%s%%* %%#DiagnosticWarn# ⏳ preparing… %ds %%*%%=%%#Special#%%@v:lua.IdeRunClose@ ✕ Cancel %%X%%*")
+    return ("%%#Title#" .. label .. "%%*%%#Special#%s%%* %%#DiagnosticWarn# ⏳ preparing… %ds %%*%%=%%#Special#%%@v:lua.IdeRunClose@ ✕ Cancel %%X%%*")
       :format(title, math.floor((vim.uv.now() - run.t0) / 1000))
   end
   local running = run.job and vim.fn.jobwait({ run.job }, 0)[1] == -1
   local status = "%#DiagnosticOk# ● running %*"
-  if not running then
+  if not running and run.kind == "test" and run.exit_code ~= nil then
+    local t = run.test_summary
+    if t and t.failed == 0 and t.total > 0 then
+      status = ("%%#DiagnosticOk# ✔ %d passed%s %%*"):format(t.total - t.skipped, t.skipped > 0 and (", " .. t.skipped .. " skipped") or "")
+    elseif t and t.total > 0 then
+      status = ("%%#DiagnosticError# ✘ %d failed of %d %%*"):format(t.failed, t.total)
+    elseif t and t.total == 0 then
+      status = "%#DiagnosticWarn# no tests ran %*"
+    else
+      status = run.exit_code == 0 and "%#DiagnosticOk# ✔ finished %*"
+        or "%#DiagnosticError# ✘ build failed (see the output) %*"
+    end
+  elseif not running then
     local code = run.exit_code
     status = code == nil and "%#Comment# finished %*"
       or code == 0 and "%#Comment# finished (exit code 0) %*"
       or ("%%#DiagnosticError# finished (exit code %d) %%*"):format(code)
   end
-  return ("%%#Title# RUN %%*%%#Special#%s%%* %s%%=%%#DiagnosticOk#%%@v:lua.IdeRunRerun@ ⟳ Rerun %%X%%*"):format(title, status)
+  return ("%%#Title#" .. label .. "%%*%%#Special#%s%%* %s%%=%%#DiagnosticOk#%%@v:lua.IdeRunRerun@ ⟳ Rerun %%X%%*"):format(title, status)
     .. (running and "%#DiagnosticError#%@v:lua.IdeRunStop@ ■ Stop %X%*" or "")
     .. "%#Special#%@v:lua.IdeRunClose@ ✕ Close %X%*"
 end
@@ -157,7 +170,7 @@ local progress_ns = vim.api.nvim_create_namespace("ide_java_run_progress")
 local function prepare(title)
   M.stop()
   run.token = (run.token or 0) + 1
-  run.preparing, run.title, run.exit_code, run.t0, run.job = true, title, nil, vim.uv.now(), nil
+  run.preparing, run.title, run.exit_code, run.t0, run.job, run.kind = true, title, nil, vim.uv.now(), nil, nil
   local buf = vim.api.nvim_create_buf(false, true)
   vim.bo[buf].bufhidden = "wipe"
   show_in_panel(buf)
@@ -203,7 +216,26 @@ local function fail(token, msg)
 end
 
 --- Start `cmd` in the Run panel (reusing it), with keyboard input going to the program.
-local function start(token, cmd, cwd, title)
+--- Maven/Gradle test totals from the output: { total, failed, skipped } or nil.
+local function parse_test_summary(lines)
+  local summary
+  for _, l in ipairs(lines) do
+    l = l:gsub("\27%[[%d;]*m", "") -- strip colors
+    -- Maven Surefire: "Tests run: 12, Failures: 1, Errors: 0, Skipped: 2" (the last one is the total)
+    local t, f, e, sk = l:match("Tests run: (%d+), Failures: (%d+), Errors: (%d+), Skipped: (%d+)")
+    if t then
+      summary = { total = tonumber(t), failed = tonumber(f) + tonumber(e), skipped = tonumber(sk) }
+    end
+    -- Gradle: "12 tests completed, 2 failed, 1 skipped"
+    local gt, rest = l:match("(%d+) tests? completed(.*)")
+    if gt then
+      summary = { total = tonumber(gt), failed = tonumber(rest:match("(%d+) failed") or 0), skipped = tonumber(rest:match("(%d+) skipped") or 0) }
+    end
+  end
+  return summary
+end
+
+local function start(token, cmd, cwd, title, kind)
   if token ~= run.token then
     return -- cancelled (✕) or replaced by another run while preparing
   end
@@ -212,13 +244,16 @@ local function start(token, cmd, cwd, title)
   local buf = vim.api.nvim_create_buf(false, true)
   vim.bo[buf].bufhidden = "wipe"
   show_in_panel(buf)
-  run.title, run.exit_code = title, nil
+  run.title, run.exit_code, run.kind, run.test_summary = title, nil, kind, nil
   vim.api.nvim_set_current_win(run.win)
   vim.api.nvim_buf_call(buf, function()
     run.job = vim.fn.jobstart(cmd, {
       term = true,
       cwd = cwd,
       on_exit = function(_, code)
+        if kind == "test" and vim.api.nvim_buf_is_valid(buf) then
+          run.test_summary = parse_test_summary(vim.api.nvim_buf_get_lines(buf, 0, -1, false))
+        end
         run.exit_code = code
         vim.schedule(function()
           -- leave typing mode so the next key doesn't close the output (Neovim prints
@@ -280,6 +315,72 @@ vim.api.nvim_create_autocmd("LspProgress", {
     progress_line(vim.trim(text))
   end,
 })
+
+--- jdtls servers that finished loading their project (client id -> true), from jdtls's
+--- "ServiceReady" status message.
+local ready = {}
+
+--- Called when jdtls attaches (plugins/java-run.lua): watch for its ServiceReady message.
+function M.track_ready(client)
+  if client._ide_ready_tracked then
+    return
+  end
+  client._ide_ready_tracked = true
+  client.handlers = client.handlers or {}
+  local orig = client.handlers["language/status"]
+  client.handlers["language/status"] = function(err, result, ctx, ...)
+    if result and result.type == "ServiceReady" then
+      ready[client.id] = true
+    end
+    if orig then
+      return orig(err, result, ctx, ...)
+    end
+  end
+end
+
+--- Wait until jdtls has loaded the project and is idle (no import/build in progress), then cb().
+--- Needed before building and before Maven runs tests: jdtls compiles into the same
+--- target/classes folder, and while it's busy classes are missing (NoClassDefFoundError,
+--- false "compile errors").
+local function wait_jdtls_idle(token, cb)
+  local clients = vim.lsp.get_clients({ name = "jdtls" })
+  if #clients == 0 then
+    return cb()
+  end
+  local started = vim.uv.now()
+  local idle_since, announced = nil, false
+  local function check()
+    if token ~= run.token then
+      return
+    end
+    local all_ready = true
+    for _, c in ipairs(vim.lsp.get_clients({ name = "jdtls" })) do
+      if not (c.initialized and ready[c.id]) then
+        all_ready = false
+      end
+    end
+    if next(busy) == nil then
+      idle_since = idle_since or vim.uv.now()
+    else
+      idle_since = nil
+    end
+    local idle_for = idle_since and (vim.uv.now() - idle_since) or 0
+    -- ready and idle for 1.5 s; or (ServiceReady missed) idle for 5 s after initializing
+    if (all_ready and idle_for >= 1500) or (not all_ready and idle_for >= 5000 and vim.uv.now() - started > 5000
+        and vim.iter(vim.lsp.get_clients({ name = "jdtls" })):all(function(c) return c.initialized end)) then
+      return cb()
+    end
+    if not announced and vim.uv.now() - started > 600 then
+      announced = true
+      status(token, "Waiting for the Java language server to finish loading/compiling the project…")
+    end
+    if vim.uv.now() - started > 180000 then
+      return cb()
+    end
+    vim.defer_fn(check, 250)
+  end
+  check()
+end
 
 --------------------------------------------------------------------------------
 -- Running
@@ -409,33 +510,7 @@ local function run_with_jdtls(token, client, bufnr, path, cls)
     if token ~= run.token then
       return
     end
-    -- wait until jdtls has finished importing/building (idle for a moment), at most 3 minutes
-    local idle_since, waited, announced = nil, 0, false
-    local function when_idle(cb)
-      if token ~= run.token then
-        return
-      end
-      if next(busy) == nil then
-        idle_since = idle_since or vim.uv.now()
-        if vim.uv.now() - idle_since >= 1500 then
-          return cb()
-        end
-      else
-        idle_since = nil
-        if not announced then
-          announced = true
-          status(token, "Waiting for the Java language server to finish importing the project…")
-        end
-      end
-      waited = waited + 250
-      if waited > 180000 then
-        return cb()
-      end
-      vim.defer_fn(function()
-        when_idle(cb)
-      end, 250)
-    end
-    when_idle(function()
+    wait_jdtls_idle(token, function()
     status(token, "Building the project…")
     client:request("java/buildWorkspace", false, function(err, result)
       vim.schedule(function()
@@ -493,6 +568,9 @@ function M.run(path)
     return notify(("%s has no main method"):format(vim.fn.fnamemodify(path, ":t")), vim.log.levels.WARN)
   end
   run.last = path
+  run.rerun = function()
+    M.run(path)
+  end
   local cls = M.class_name(path, lines)
   vim.cmd("silent! wall") -- run what's on screen
   local token = prepare(cls)
@@ -544,6 +622,173 @@ function M.run(path)
     vim.defer_fn(wait, 250)
   end
   wait()
+end
+
+--------------------------------------------------------------------------------
+-- JUnit tests (Maven / Gradle)
+--------------------------------------------------------------------------------
+
+local TEST_ANNOTATION = { "@Test", "@ParameterizedTest", "@RepeatedTest", "@TestFactory", "@TestTemplate" }
+
+local function is_test_annotation(line)
+  for _, a in ipairs(TEST_ANNOTATION) do
+    if line:find(a .. "%f[%W]") then
+      return true
+    end
+  end
+  return false
+end
+
+--- For a Java file with JUnit tests: { class = "DPTest", method = "testX" | nil }.
+--- `cursor` (1-based line) picks the test method the cursor is in, if any.
+function M.test_info(path, lines, cursor)
+  if not path or not path:match("%.java$") then
+    return nil
+  end
+  lines = lines or file_lines(path)
+  local text = strip_comments(lines)
+  local has_test = false
+  for line in (text .. "\n"):gmatch("(.-)\n") do
+    if is_test_annotation(line) then
+      has_test = true
+      break
+    end
+  end
+  if not has_test then
+    return nil
+  end
+  local info = { class = vim.fn.fnamemodify(path, ":t:r") }
+  if cursor then
+    local code = vim.split(text, "\n")
+    if code[cursor] and is_test_annotation(code[cursor]) then -- on the @Test line: method is just below
+      for i = cursor + 1, math.min(#code, cursor + 4) do
+        local name = code[i]:match("%f[%w]void%s+([%w_]+)%s*%(")
+        if name then
+          info.method = name
+          return info
+        end
+      end
+    end
+    for i = math.min(cursor, #code), 1, -1 do
+      local name = code[i]:match("%f[%w]void%s+([%w_]+)%s*%(")
+      if name then
+        for j = i - 1, math.max(1, i - 4), -1 do -- its annotations sit right above it
+          if is_test_annotation(code[j]) then
+            info.method = name
+            break
+          end
+        end
+        if not info.method and is_test_annotation(code[i]) then
+          info.method = name
+        end
+        break
+      end
+    end
+  end
+  return info
+end
+
+local function find_up(dir, names)
+  local found = vim.fs.find(names, { path = dir, upward = true, type = "file" })[1]
+  return found and vim.fn.fnamemodify(found, ":h"), found and vim.fn.fnamemodify(found, ":t")
+end
+
+--- Run the JUnit tests of a test class (or one test method) with Maven or Gradle.
+--- Run JUnit tests with Maven or Gradle. `selectors`: "pkg.Class" or "pkg.Class#method".
+local function run_test_selection(selectors, start_dir, title, rerun)
+  run.rerun = rerun
+  vim.cmd("silent! wall")
+  local token = prepare(title)
+  run.kind = "test"
+
+  local root, build = find_up(start_dir, { "pom.xml", "build.gradle", "build.gradle.kts" })
+  if not root then
+    return fail(token, "Running tests needs a Maven (pom.xml) or Gradle (build.gradle) project.")
+  end
+  local cmd
+  if build == "pom.xml" then
+    local mvn = vim.uv.fs_stat(root .. "/mvnw") and "./mvnw" or "mvn"
+    if mvn == "mvn" and vim.fn.executable("mvn") == 0 then
+      return fail(token, "Maven (mvn) isn't installed.")
+    end
+    cmd = { mvn, "test", "-Dtest=" .. table.concat(selectors, ","), "-Dsurefire.failIfNoSpecifiedTests=false" }
+  else
+    local gradle = vim.uv.fs_stat(root .. "/gradlew") and "./gradlew" or "gradle"
+    if gradle == "gradle" and vim.fn.executable("gradle") == 0 then
+      return fail(token, "Gradle isn't installed.")
+    end
+    cmd = { gradle, "test" }
+    for _, sel in ipairs(selectors) do
+      vim.list_extend(cmd, { "--tests", (sel:gsub("#", ".")) })
+    end
+  end
+  wait_jdtls_idle(token, function()
+    local shown = table.concat(cmd, " ")
+    status(token, #shown > 300 and (shown:sub(1, 300) .. "…") or shown)
+    start(token, cmd, root, title, "test")
+  end)
+end
+
+--- Run the JUnit tests of a test class (or one test method).
+function M.run_tests(path, method)
+  path = vim.fn.fnamemodify(path, ":p")
+  local info = M.test_info(path)
+  if not info then
+    return notify(("%s has no JUnit tests"):format(vim.fn.fnamemodify(path, ":t")), vim.log.levels.WARN)
+  end
+  local fqcn = M.class_name(path, file_lines(path))
+  run_test_selection({ fqcn .. (method and ("#" .. method) or "") }, vim.fn.fnamemodify(path, ":h"),
+    method and (info.class .. "." .. method .. "()") or info.class, function()
+      M.run_tests(path, method)
+    end)
+end
+
+local SKIP_DIRS = { target = true, build = true, out = true, bin = true, node_modules = true, [".git"] = true, [".idea"] = true, [".gradle"] = true }
+
+--- Test classes in a folder and its subfolders: list of { path, fqcn }.
+--- With `first_only`, stops at the first one (for menus: "are there any?").
+function M.tests_in_dir(dir, first_only)
+  local found, scanned = {}, 0
+  for name, kind in vim.fs.dir(dir, {
+    depth = 30,
+    skip = function(d)
+      return not SKIP_DIRS[vim.fs.basename(d)]
+    end,
+  }) do
+    if kind == "file" and name:match("%.java$") then
+      scanned = scanned + 1
+      local path = dir .. "/" .. name
+      local lines = file_lines(path)
+      if M.test_info(path, lines) then
+        table.insert(found, { path = path, fqcn = M.class_name(path, lines) })
+        if first_only then
+          break
+        end
+      end
+      if scanned > 5000 then
+        break
+      end
+    end
+  end
+  table.sort(found, function(a, b)
+    return a.fqcn < b.fqcn
+  end)
+  return found
+end
+
+--- Run every JUnit test class in a folder (and its subfolders).
+function M.run_dir_tests(dir)
+  dir = vim.fn.fnamemodify(dir, ":p"):gsub("/$", "")
+  local tests = M.tests_in_dir(dir)
+  if #tests == 0 then
+    return notify(("No JUnit tests in %s"):format(vim.fn.fnamemodify(dir, ":t")), vim.log.levels.WARN)
+  end
+  local selectors = vim.tbl_map(function(t)
+    return t.fqcn
+  end, tests)
+  run_test_selection(selectors, dir, ("all in '%s' (%d class%s)"):format(vim.fn.fnamemodify(dir, ":t"), #tests, #tests == 1 and "" or "es"), function()
+    M.run_dir_tests(dir)
+  end)
 end
 
 return M

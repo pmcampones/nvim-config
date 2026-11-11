@@ -73,6 +73,17 @@ vim.cmd([[
 -- "▶ Run 'Main.main()'" at the top of the menu for Java files with a main method
 -- (lua/ide/java_run.lua).
 local run_item -- name of the item currently in the menu
+local test_item
+_G.NeotreeContextTests = function()
+  local node = target_state and target_state.tree:get_node()
+  if node and node.path then
+    if node.type == "directory" then
+      require("ide.java_run").run_dir_tests(node.path)
+    else
+      require("ide.java_run").run_tests(node.path)
+    end
+  end
+end
 _G.NeotreeContextRun = function()
   local node = target_state and target_state.tree:get_node()
   if node and node.path then
@@ -82,8 +93,24 @@ end
 local function update_run_item(node)
   if run_item then
     pcall(vim.cmd.aunmenu, run_item)
-    pcall(vim.cmd.aunmenu, "]NeoTree.-run-sep-")
     run_item = nil
+  end
+  if test_item then
+    pcall(vim.cmd.aunmenu, test_item)
+    test_item = nil
+  end
+  pcall(vim.cmd.aunmenu, "]NeoTree.-run-sep-")
+  local tests = node and node.type == "file" and require("ide.java_run").test_info(node.path)
+  local dir_has_tests = node and node.type == "directory" and node.path
+    and #require("ide.java_run").tests_in_dir(node.path, true) > 0
+  if dir_has_tests then
+    tests = { class = vim.fn.fnamemodify(node.path, ":t") }
+  end
+  if tests then
+    local label = dir_has_tests and "Run All Tests in '%s'" or "Run Tests in '%s'"
+    test_item = "]NeoTree.▶\\ " .. label:format(tests.class):gsub("[%s%.\\]", "\\%0")
+    vim.cmd(("anoremenu 1.02 %s <Cmd>lua NeotreeContextTests()<CR>"):format(test_item))
+    vim.cmd("anoremenu 1.1 ]NeoTree.-run-sep- <Nop>")
   end
   local name = node and node.type == "file" and require("ide.java_run").runnable(node.path)
   if name then
