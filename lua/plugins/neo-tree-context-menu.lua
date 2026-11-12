@@ -96,6 +96,13 @@ _G.NeotreeContextRun = function(profile)
   end
 end
 
+_G.NeotreeContextGoRun = function()
+  local node = target_state and target_state.tree:get_node()
+  if node and node.path then
+    require("ide.go_run").run(node.path)
+  end
+end
+
 local function menu_text(text)
   return (text:gsub("[%s%.\\]", "\\%0"))
 end
@@ -106,17 +113,22 @@ local function update_run_item(node)
   end
   run_items = {}
   pcall(vim.cmd.aunmenu, "]NeoTree.-run-sep-")
-  local function add(priority, text, rhs)
+  -- "1.1": the item's priority is the 2nd number (the 1st is the menu's); same-priority items
+  -- keep the order they're added in, and the separator is added last (below them)
+  local function add(_, text, rhs)
     local item = "]NeoTree." .. menu_text(text)
-    vim.cmd(("anoremenu %s %s <Cmd>lua %s<CR>"):format(priority, item, rhs))
+    vim.cmd(("anoremenu 1.1 %s <Cmd>lua %s<CR>"):format(item, rhs))
     table.insert(run_items, item)
-    vim.cmd("anoremenu 1.1 ]NeoTree.-run-sep- <Nop>")
   end
   local jr = require("ide.java_run")
   local name = node and node.type == "file" and jr.runnable(node.path)
   if name then
     add("1", ("▶ Run '%s.main()'"):format(name), "NeotreeContextRun()")
     add("1.01", ("◉ Profile '%s.main()'"):format(name), "NeotreeContextRun(true)")
+  end
+  local go_name = node and node.type == "file" and require("ide.go_run").runnable(node.path)
+  if go_name then
+    add("1", ("▶ Run '%s'"):format(go_name), "NeotreeContextGoRun()")
   end
   local tests = node and node.type == "file" and jr.test_info(node.path)
   local dir_has_tests = node and node.type == "directory" and node.path and #jr.tests_in_dir(node.path, true) > 0
@@ -129,6 +141,9 @@ local function update_run_item(node)
       or ("Tests in '%s'"):format(tests.class)
     add("1.02", "▶ Run " .. what, "NeotreeContextTests()")
     add("1.03", "◉ Profile " .. what, "NeotreeContextTests(true)")
+  end
+  if #run_items > 0 then
+    vim.cmd("anoremenu 1.1 ]NeoTree.-run-sep- <Nop>")
   end
 end
 

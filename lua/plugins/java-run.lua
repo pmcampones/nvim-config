@@ -30,14 +30,14 @@ vim.api.nvim_create_autocmd("MenuPopup", {
     TEST_ITEMS = {}
     local name = vim.bo.filetype == "java" and require("ide.java_run").runnable(vim.api.nvim_buf_get_name(0))
     if name then
-      -- priority 1 puts it at the top of the menu, like IntelliJ ("\\." keeps the dot in
+      -- priority 1.1 (PopUp 1, item 1) puts it at the top of the menu, like IntelliJ; items
+      -- with the same priority keep the order they're added in ("\\." keeps the dot in
       -- "Main.main()" from starting a submenu)
       ITEM = ("PopUp.▶\\ Run\\ '%s\\.main()'"):format(name)
-      vim.cmd(("anoremenu 1 %s <Cmd>lua IdeRunCurrentJava()<CR>"):format(ITEM))
+      vim.cmd(("anoremenu 1.1 %s <Cmd>lua IdeRunCurrentJava()<CR>"):format(ITEM))
       local profile_item = "PopUp." .. menu_name(("◉ Profile '%s.main()'"):format(name))
-      vim.cmd(("anoremenu 1.01 %s <Cmd>lua IdeRunCurrentJava(true)<CR>"):format(profile_item))
+      vim.cmd(("anoremenu 1.1 %s <Cmd>lua IdeRunCurrentJava(true)<CR>"):format(profile_item))
       table.insert(TEST_ITEMS, profile_item)
-      vim.cmd("anoremenu 1.1 " .. SEP .. " <Nop>")
     end
     -- JUnit: the test method under the cursor, and the whole class
     local tests = vim.bo.filetype == "java"
@@ -45,20 +45,22 @@ vim.api.nvim_create_autocmd("MenuPopup", {
     if tests then
       if tests.method then
         local item = "PopUp." .. menu_name(("▶ Run Test '%s()'"):format(tests.method))
-        vim.cmd(("anoremenu 1.02 %s <Cmd>lua IdeRunJavaTests(%q)<CR>"):format(item, tests.method))
+        vim.cmd(("anoremenu 1.1 %s <Cmd>lua IdeRunJavaTests(%q)<CR>"):format(item, tests.method))
         table.insert(TEST_ITEMS, item)
         local pitem = "PopUp." .. menu_name(("◉ Profile Test '%s()'"):format(tests.method))
-        vim.cmd(("anoremenu 1.025 %s <Cmd>lua IdeRunJavaTests(%q, true)<CR>"):format(pitem, tests.method))
+        vim.cmd(("anoremenu 1.1 %s <Cmd>lua IdeRunJavaTests(%q, true)<CR>"):format(pitem, tests.method))
         table.insert(TEST_ITEMS, pitem)
       end
       local suffix = tests.abstract and (" (%d implementations)"):format(#tests.implementations) or ""
       local item = "PopUp." .. menu_name(("▶ Run Tests in '%s'%s"):format(tests.class, suffix))
-      vim.cmd(("anoremenu 1.03 %s <Cmd>lua IdeRunJavaTests('')<CR>"):format(item))
+      vim.cmd(("anoremenu 1.1 %s <Cmd>lua IdeRunJavaTests('')<CR>"):format(item))
       table.insert(TEST_ITEMS, item)
       local pitem = "PopUp." .. menu_name(("◉ Profile Tests in '%s'%s"):format(tests.class, suffix))
-      vim.cmd(("anoremenu 1.035 %s <Cmd>lua IdeRunJavaTests('', true)<CR>"):format(pitem))
+      vim.cmd(("anoremenu 1.1 %s <Cmd>lua IdeRunJavaTests('', true)<CR>"):format(pitem))
       table.insert(TEST_ITEMS, pitem)
-      vim.cmd("anoremenu 1.1 " .. SEP .. " <Nop>")
+    end
+    if name or tests then
+      vim.cmd("anoremenu 1.1 " .. SEP .. " <Nop>") -- added last so it ends up below the items
     end
   end,
 })

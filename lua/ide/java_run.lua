@@ -299,6 +299,14 @@ local function start(token, cmd, cwd, title, kind)
   vim.cmd.startinsert() -- typing goes to the program (Scanner, System.in…)
 end
 
+--- Run any command in the Run panel (terminal-like: output, typing goes to the program, Rerun,
+--- Stop). Used by other languages, e.g. lua/ide/go_run.lua. `rerun` is called by ⟳ Rerun.
+function M.run_in_panel(title, cmd, cwd, rerun)
+  run.rerun = rerun
+  local token = prepare(title)
+  start(token, cmd, cwd, title, "run")
+end
+
 --- jdtls work in progress (import, build…): token -> true. The project is only ready to
 --- build once this is empty; building earlier reports false "compile errors".
 local busy = {}
