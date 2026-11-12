@@ -1271,12 +1271,18 @@ function M.refresh()
   S.branch = vim.trim(git({ "branch", "--show-current" }) or "") -- may have changed (checkout, rebase…)
   S.ahead = require("ide.git_repo").ahead(S.root)
   load_entries()
+  -- keep the same commit selected; if it's gone (amend, rebase, removed…), the newest one
+  local newest
   for _, e in ipairs(S.entries) do
-    if e.hash and (e.hash == hash or not hash) then
-      S.selected = e -- keep the same commit selected (or the newest one)
-      break
+    if e.hash then
+      newest = newest or e
+      if e.hash == hash then
+        S.selected = e
+        break
+      end
     end
   end
+  S.selected = S.selected or newest
   render_list()
   render_files()
   render_details()
