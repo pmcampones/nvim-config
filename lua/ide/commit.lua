@@ -115,13 +115,36 @@ function M.stage(node)
   refresh()
 end
 
+--- Original paths of staged renames whose new path is `path` or lies below it. A rename is
+--- staged as "delete old + add new": unstaging only the new path would leave the deletion of
+--- the old one staged (it would show up as a separate, still ticked, deleted file).
+local function rename_sources(root, path)
+  local res = vim.system({ "git", "diff", "--cached", "--name-status", "-M", "-z" }, { cwd = root, text = true }):wait()
+  local f = vim.split(res.stdout or "", "\0", { trimempty = true })
+  local sources, prefix = {}, path .. "/"
+  local i = 1
+  while i <= #f do
+    local status = f[i]
+    if status:match("^[RC]") then
+      local old, new = root .. "/" .. f[i + 1], root .. "/" .. f[i + 2]
+      if status:sub(1, 1) == "R" and (path == root or new == path or new:sub(1, #prefix) == prefix) then
+        table.insert(sources, old)
+      end
+      i = i + 3
+    else
+      i = i + 2
+    end
+  end
+  return sources
+end
+
 function M.unstage(node)
   local root = worktree(node.path)
   if not root then
     return
   end
   if has_head(root) then
-    git(root, { "reset", "--quiet", "--", node.path })
+    git(root, vim.list_extend({ "reset", "--quiet", "--", node.path }, rename_sources(root, node.path)))
   else -- brand-new repository: nothing to reset to
     git(root, { "rm", "-r", "--cached", "--quiet", "--", node.path })
   end
