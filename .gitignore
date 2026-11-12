@@ -7,3 +7,5 @@ foo.*
 *.log
 data
 /lua/resources/
+/.idea/
+/lua/lua.iml
