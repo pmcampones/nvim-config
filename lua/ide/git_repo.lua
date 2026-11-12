@@ -198,4 +198,75 @@ function M.ahead(root)
   return n and tonumber(n) or nil
 end
 
+--------------------------------------------------------------------------------
+-- .gitignore
+--------------------------------------------------------------------------------
+
+--- A .gitignore line matching exactly this path (relative to the repository root):
+--- "/src/secret.txt" or "/build/" for a folder. Special characters are escaped.
+local function ignore_pattern(rel, is_dir)
+  local p = rel:gsub("([%*%?%[%]\\])", "\\%1") -- glob characters are literal
+  p = p:gsub(" +$", function(sp) -- trailing spaces would be dropped by Git
+    return (sp:gsub(" ", "\\ "))
+  end)
+  return "/" .. p .. (is_dir and "/" or "")
+end
+
+--- Add a file or folder to the repository's .gitignore (root of the repository). If Git already
+--- tracks it, offer to stop tracking it too (the files stay on disk).
+function M.add_to_gitignore(path)
+  path = vim.fn.fnamemodify(path, ":p"):gsub("/$", "")
+  local root = M.root(path)
+  if not root then
+    return notify("Not inside a Git repository", vim.log.levels.WARN)
+  end
+  if path == root then
+    return notify("The project folder itself can't be ignored", vim.log.levels.WARN)
+  end
+  local rel = path:sub(#root + 2)
+  if rel == ".git" or rel:match("^%.git/") or rel == ".gitignore" then
+    return notify(("'%s' can't be added to .gitignore"):format(rel), vim.log.levels.WARN)
+  end
+  local is_dir = vim.fn.isdirectory(path) == 1
+  local pattern = ignore_pattern(rel, is_dir)
+  local file = root .. "/.gitignore"
+  local lines = vim.uv.fs_stat(file) and vim.fn.readfile(file) or {}
+  if vim.tbl_contains(lines, pattern) then
+    notify(("'%s' is already in .gitignore"):format(pattern))
+  else
+    -- keep the file ending with a newline; don't glue onto a last line without one
+    if #lines > 0 and lines[#lines] == "" then
+      table.remove(lines)
+    end
+    table.insert(lines, pattern)
+    vim.fn.writefile(lines, file)
+    local buf = vim.fn.bufnr(file)
+    if buf ~= -1 and vim.api.nvim_buf_is_loaded(buf) and not vim.bo[buf].modified then
+      vim.api.nvim_buf_call(buf, function()
+        vim.cmd("silent! edit")
+      end)
+    end
+    notify(("Added '%s' to .gitignore"):format(pattern))
+  end
+
+  -- .gitignore only affects untracked files: offer to stop tracking it
+  local tracked = git(root, { "ls-files", "--", rel })
+  if tracked and tracked ~= "" then
+    local count = #vim.split(tracked, "\n", { trimempty = true })
+    local msg = ("Git already tracks %s, so .gitignore has no effect on %s yet.\n\n"
+      .. "Stop tracking %s? The file%s stay%s on disk; %s removed from the repository in your next commit.")
+      :format(is_dir and ("%d file(s) in '%s'"):format(count, rel) or ("'" .. rel .. "'"), count == 1 and "it" or "them",
+        count == 1 and "it" or "them", count == 1 and "" or "s", count == 1 and "s" or "", count == 1 and "it's" or "they're")
+    if vim.fn.confirm(msg, "&Stop tracking\n&Keep tracking", 1, "Question") == 1 then
+      local _, res = git(root, { "rm", "-r", "--cached", "--quiet", "--", rel })
+      if res.code == 0 then
+        notify(("Git stopped tracking '%s' (still on disk). Commit to make it final."):format(rel))
+      else
+        notify("Couldn't stop tracking it:\n" .. vim.trim(res.stderr), vim.log.levels.ERROR)
+      end
+    end
+  end
+  refresh()
+end
+
 return M

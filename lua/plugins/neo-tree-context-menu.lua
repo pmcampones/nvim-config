@@ -5,7 +5,8 @@
 --   Stage / Unstage (shown only when the file or folder has changes to stage/unstage)
 --   Show Diff: current file vs. last commit, side by side (only for changed, committed files)
 --   Rollback…: discard changes since the last commit (asks first; only when there are changes)
---   Create Git Repository… (folders outside a repository), Set Git Remote…, Push
+--   Create Git Repository… (folders outside a repository), Set Git Remote…, Push,
+--   Add to .gitignore
 -- In the editor: "Show Git Diff" / "Rollback to Last Commit…" in Neovim's right-click menu.
 -- In the Commit tab: Stage / Unstage / Show Diff / Rollback / Copy Path.
 --   ▶ Run / ◉ Profile 'Main.main()' for Java files with a main method, and ▶ Run / ◉ Profile
@@ -67,6 +68,7 @@ vim.cmd([[
   anoremenu ]NeoTree.Create\ Git\ Repository…  <Cmd>lua NeotreeContextRepo("init")<CR>
   anoremenu ]NeoTree.Set\ Git\ Remote…  <Cmd>lua NeotreeContextRepo("set_remote")<CR>
   anoremenu ]NeoTree.Push        <Cmd>lua NeotreeContextRepo("push")<CR>
+  anoremenu ]NeoTree.Add\ to\ \.gitignore  <Cmd>lua NeotreeContextIgnore()<CR>
   anoremenu ]NeoTree.-sep3-      <Nop>
   anoremenu ]NeoTree.Copy\ Path  <Cmd>lua NeotreeContextCopyPath()<CR>
 ]])
@@ -156,6 +158,10 @@ local function update_git_items(menu)
     set("Set\\ Remote…", repo ~= nil)
   end
   set("Push", repo ~= nil)
+  if menu == "]NeoTree" then -- not on the project folder itself, .git or .gitignore
+    local rel = repo and path and path:sub(#repo + 2) or ""
+    set("Add\\ to\\ \\.gitignore", repo ~= nil and path ~= repo and rel ~= ".gitignore" and rel ~= ".git" and not rel:match("^%.git/"))
+  end
   if menu == "]NeoTree" then
     -- no double separator when there is no Git item
     set("-sep3-", can_stage or can_unstage or can_diff or can_rollback or path ~= nil)
@@ -191,6 +197,13 @@ vim.api.nvim_create_autocmd("MenuPopup", {
 
 -- Create Git Repository… / Set Remote… / Push (lua/ide/git_repo.lua). On a file, they act on
 -- its folder.
+_G.NeotreeContextIgnore = function()
+  local node = target_state and target_state.tree:get_node()
+  if node and node.path then
+    require("ide.git_repo").add_to_gitignore(node.path)
+  end
+end
+
 _G.NeotreeContextRepo = function(action)
   local node = target_state and target_state.tree:get_node()
   if node and node.path then
