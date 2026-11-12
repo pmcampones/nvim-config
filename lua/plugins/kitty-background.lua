@@ -11,9 +11,9 @@
 -- alternate screen). Kitty can't fade images itself, so a faded copy is made once with
 -- ImageMagick and cached.
 
-local ENABLED = false -- false: no image, use the theme's background
+local ENABLED = true -- false: no image, use the theme's background
 
-local IMAGE = vim.fn.stdpath("config") .. "/lua/resources/though_cabinet.jpg"
+local IMAGE = vim.fn.stdpath("config") .. "/lua/resources/thought_cabinet.jpg"
 local FADE = 85 -- % blended toward the background color: higher = fainter image, easier reading
 local BG = "#282828" -- gruvbox dark background
 local CELL_ASPECT = 2.1 -- terminal cell height / width (used to crop the image to the window)
