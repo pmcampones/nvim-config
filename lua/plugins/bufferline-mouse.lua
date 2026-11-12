@@ -3,7 +3,7 @@
 --   * a file with unsaved changes shows ● where the close button was: clicking it closes too
 --     (you're asked whether to save)
 --   * middle click on a tab closes it
---   * right click opens a menu: Close, Close Others, Close Tabs to the Left / Right, Close All,
+--   * right click opens a menu: Close, Close All Except This One, Close All Tabs to the Left / Right, Close All,
 --     Copy Path, Reveal in Explorer (it used to close the tab straight away)
 
 local CLOSE = "v:lua.___bufferline_private.handle_close"
@@ -134,9 +134,9 @@ end
 pcall(vim.cmd, "aunmenu ]EditorTab")
 vim.cmd([[
   anoremenu ]EditorTab.Close                     <Cmd>lua IdeTabMenu("close")<CR>
-  anoremenu ]EditorTab.Close\ Others             <Cmd>lua IdeTabMenu("others")<CR>
-  anoremenu ]EditorTab.Close\ Tabs\ to\ the\ Left  <Cmd>lua IdeTabMenu("left")<CR>
-  anoremenu ]EditorTab.Close\ Tabs\ to\ the\ Right <Cmd>lua IdeTabMenu("right")<CR>
+  anoremenu ]EditorTab.Close\ All\ Except\ This\ One             <Cmd>lua IdeTabMenu("others")<CR>
+  anoremenu ]EditorTab.Close\ All\ Tabs\ to\ the\ Left  <Cmd>lua IdeTabMenu("left")<CR>
+  anoremenu ]EditorTab.Close\ All\ Tabs\ to\ the\ Right <Cmd>lua IdeTabMenu("right")<CR>
   anoremenu ]EditorTab.Close\ All                <Cmd>lua IdeTabMenu("all")<CR>
   anoremenu ]EditorTab.-sep1-                    <Nop>
   anoremenu ]EditorTab.Copy\ Path                <Cmd>lua IdeTabMenu("copy")<CR>
@@ -150,9 +150,9 @@ local function open_menu(n)
   local function set(item, on)
     pcall(vim.cmd, ("amenu %s ]EditorTab.%s"):format(on and "enable" or "disable", item))
   end
-  set([[Close\ Others]], #ids > 1)
-  set([[Close\ Tabs\ to\ the\ Left]], idx > 1)
-  set([[Close\ Tabs\ to\ the\ Right]], idx > 0 and idx < #ids)
+  set([[Close\ All\ Except\ This\ One]], #ids > 1)
+  set([[Close\ All\ Tabs\ to\ the\ Left]], idx > 1)
+  set([[Close\ All\ Tabs\ to\ the\ Right]], idx > 0 and idx < #ids)
   local named = vim.api.nvim_buf_get_name(n) ~= ""
   set([[Copy\ Path]], named)
   set([[Reveal\ in\ Explorer]], named)
