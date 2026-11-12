@@ -96,6 +96,17 @@ _G.NeotreeContextRun = function(profile)
   end
 end
 
+_G.NeotreeContextGoTests = function()
+  local node = target_state and target_state.tree:get_node()
+  if node and node.path then
+    if node.type == "directory" then
+      require("ide.go_run").run_dir_tests(node.path)
+    else
+      require("ide.go_run").run_tests(node.path)
+    end
+  end
+end
+
 _G.NeotreeContextGoRun = function()
   local node = target_state and target_state.tree:get_node()
   if node and node.path then
@@ -141,6 +152,16 @@ local function update_run_item(node)
       or ("Tests in '%s'"):format(tests.class)
     add("1.02", "▶ Run " .. what, "NeotreeContextTests()")
     add("1.03", "◉ Profile " .. what, "NeotreeContextTests(true)")
+  end
+  -- Go tests: a _test.go file, or every test in a folder (sub-folders included)
+  local gr = require("ide.go_run")
+  local go_tests = node and node.type == "file" and gr.test_info(node.path)
+  if go_tests then
+    add("1.04", ("▶ Run Tests in '%s'"):format(go_tests.file), "NeotreeContextGoTests()")
+  elseif node and node.type == "directory" and node.path and gr.dir_has_tests(node.path) then
+    -- (a different name when the folder also has Java tests: menu items need unique names)
+    add("1.04", ("▶ Run All %sTests in '%s'"):format(dir_has_tests and "Go " or "", vim.fn.fnamemodify(node.path, ":t")),
+      "NeotreeContextGoTests()")
   end
   if #run_items > 0 then
     vim.cmd("anoremenu 1.1 ]NeoTree.-run-sep- <Nop>")

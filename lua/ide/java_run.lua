@@ -103,7 +103,8 @@ _G.IdeRunWinbar = function()
     return ("%%#Title#" .. label .. "%%*%%#Special#%s%%* %%#DiagnosticWarn# ⏳ preparing… %ds %%*%%=%%#Special#%%@v:lua.IdeRunClose@ ✕ Cancel %%X%%*")
       :format(title, math.floor((vim.uv.now() - run.t0) / 1000))
   end
-  local running = run.job and vim.fn.jobwait({ run.job }, 0)[1] == -1
+  -- (not jobwait(): it can run "terminal closed" autocommands while the bar is drawn → E565)
+  local running = run.job ~= nil and run.job > 0 and run.exit_code == nil
   local status = "%#DiagnosticOk# ● running %*"
   if not running and run.kind == "test" and run.exit_code ~= nil then
     local t = run.test_summary
@@ -226,7 +227,7 @@ end
 --- Start `cmd` in the Run panel (reusing it), with keyboard input going to the program.
 --- Maven/Gradle test totals from the output: { total, failed, skipped } or nil.
 local function parse_test_summary(lines)
-  local summary, console
+  local summary, console, gotest
   for _, l in ipairs(lines) do
     l = l:gsub("\27%[[%d;]*m", "") -- strip colors
     -- Maven Surefire: "Tests run: 12, Failures: 1, Errors: 0, Skipped: 2" (the last one is the total)
@@ -246,13 +247,21 @@ local function parse_test_summary(lines)
         console.skipped = console.skipped + tonumber(n)
       end
     end
+    -- go test -v: "--- PASS: TestX (0.00s)", "--- FAIL: …", "--- SKIP: …" (subtests are indented)
+    local go = l:match("^%s*%-%-%- (%u+): ")
+    if go == "PASS" or go == "FAIL" or go == "SKIP" then
+      gotest = gotest or { total = 0, failed = 0, skipped = 0 }
+      gotest.total = gotest.total + 1
+      gotest.failed = gotest.failed + (go == "FAIL" and 1 or 0)
+      gotest.skipped = gotest.skipped + (go == "SKIP" and 1 or 0)
+    end
     -- Gradle: "12 tests completed, 2 failed, 1 skipped"
     local gt, rest = l:match("(%d+) tests? completed(.*)")
     if gt then
       summary = { total = tonumber(gt), failed = tonumber(rest:match("(%d+) failed") or 0), skipped = tonumber(rest:match("(%d+) skipped") or 0) }
     end
   end
-  return console or summary
+  return console or gotest or summary
 end
 
 local function start(token, cmd, cwd, title, kind)
@@ -272,6 +281,9 @@ local function start(token, cmd, cwd, title, kind)
       term = true,
       cwd = cwd,
       on_exit = function(_, code)
+        if run.buf ~= buf then
+          return -- a run that was replaced (Rerun / another run): don't touch the new one
+        end
         if kind == "test" and vim.api.nvim_buf_is_valid(buf) then
           run.test_summary = parse_test_summary(vim.api.nvim_buf_get_lines(buf, 0, -1, false))
         end
@@ -301,10 +313,11 @@ end
 
 --- Run any command in the Run panel (terminal-like: output, typing goes to the program, Rerun,
 --- Stop). Used by other languages, e.g. lua/ide/go_run.lua. `rerun` is called by ⟳ Rerun.
-function M.run_in_panel(title, cmd, cwd, rerun)
+--- kind: "run" (default) or "test" (the header then shows passed / failed totals).
+function M.run_in_panel(title, cmd, cwd, rerun, kind)
   run.rerun = rerun
   local token = prepare(title)
-  start(token, cmd, cwd, title, "run")
+  start(token, cmd, cwd, title, kind or "run")
 end
 
 --- jdtls work in progress (import, build…): token -> true. The project is only ready to
