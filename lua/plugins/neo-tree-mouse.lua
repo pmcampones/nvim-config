@@ -65,7 +65,8 @@ _G.NeotreeMouseMinimize = function()
   vim.schedule(M.minimize)
 end
 
--- Sidebar tabs (IntelliJ tool windows): minwid 1 = Project (files), 2 = Commit (git changes)
+-- Sidebar tabs (IntelliJ tool windows): minwid 1 = Project (files), 2 = Commit (git changes),
+-- 3 = Log (bottom panel)
 local TABS = { { label = "Project", source = "filesystem" }, { label = "Commit", source = "git_status" } }
 
 _G.NeotreeTab = function(minwid)
@@ -93,8 +94,7 @@ _G.NeotreeWinbar = function(win)
     table.insert(parts, ("%s%%%d@v:lua.NeotreeTab@ %s %%X%%*"):format(hl, i, tab.label))
   end
   local log_hl = package.loaded["ide.gitlog"] and require("ide.gitlog").is_open() and "%#Title#" or "%#Comment#"
-  table.insert(parts, log_hl .. "%3@v:lua.NeotreeTab@ Log %X%*")
-  return table.concat(parts, "%#Comment#│%*") .. "%=%#Special#%@v:lua.NeotreeMouseMinimize@ « Hide %X%*"
+  table.insert(parts, log_hl .. "%3@v:lua.NeotreeTab@ Log %X%*")  return table.concat(parts, "%#Comment#│%*") .. "%=%#Special#%@v:lua.NeotreeMouseMinimize@ « Hide %X%*"
 end
 _G.NeotreeMouseToggle = function()
   vim.schedule(M.toggle)
@@ -146,9 +146,15 @@ return {
   {
     "nvim-lualine/lualine.nvim",
     opts = function(_, opts)
-      opts.sections = opts.sections or {}
-      opts.sections.lualine_c = opts.sections.lualine_c or {}
-      table.insert(opts.sections.lualine_c, 1, {
+      -- LazyVim hides the statusline on the start screen (dashboard); keep it, so the explorer
+      -- and Terminal buttons are there from the moment Neovim opens
+      local disabled = vim.tbl_get(opts, "options", "disabled_filetypes", "statusline")
+      if type(disabled) == "table" then
+        opts.options.disabled_filetypes.statusline = vim.tbl_filter(function(ft)
+          return not vim.tbl_contains({ "dashboard", "alpha", "ministarter", "snacks_dashboard" }, ft)
+        end, disabled)
+      end
+      local explorer_button = {
         function()
           return is_open() and "󰉖" or "󰉋"
         end,
@@ -157,6 +163,43 @@ return {
         end,
         color = "Directory",
         padding = { left = 1, right = 1 },
+      }
+      -- "Terminal" button next to it: shows / hides the terminal panel, whose terminals are
+      -- tabs (lua/ide/terminals.lua)
+      local terminal_button = {
+        function()
+          return " Terminal"
+        end,
+        on_click = function()
+          vim.schedule(require("ide.terminals").toggle)
+        end,
+        color = function()
+          local open = package.loaded["ide.terminals"] and require("ide.terminals").is_open()
+          return open and "Title" or "Comment"
+        end,
+        padding = { left = 0, right = 1 },
+      }
+      opts.sections = opts.sections or {}
+      opts.sections.lualine_c = opts.sections.lualine_c or {}
+      table.insert(opts.sections.lualine_c, 1, explorer_button)
+      table.insert(opts.sections.lualine_c, 2, terminal_button)
+
+      -- While the explorer is focused (as it is right after startup), lualine's "neo-tree"
+      -- extension replaces the whole statusline with just the folder name: use one that also
+      -- keeps the buttons.
+      opts.extensions = vim.tbl_filter(function(ext)
+        return ext ~= "neo-tree"
+      end, opts.extensions or {})
+      table.insert(opts.extensions, {
+        filetypes = { "neo-tree" },
+        sections = {
+          lualine_a = {
+            function()
+              return vim.fn.fnamemodify(vim.fn.getcwd(), ":~")
+            end,
+          },
+          lualine_c = { explorer_button, terminal_button },
+        },
       })
     end,
   },
