@@ -8,13 +8,44 @@
 
 local CLOSE = "v:lua.___bufferline_private.handle_close"
 
---- Close buffer `n` (asks to save unsaved changes). Scheduled: running it inside the tabline's
---- click callback leaves the tab bar half-redrawn.
+--- A file shown in a side-by-side diff (Show Diff, Git Log): close its half of the split instead
+--- of leaving an empty window behind, and switch the diff off in the window that's left.
+local function leave_diff(n)
+  local function diff_wins()
+    return vim.tbl_filter(function(w)
+      return vim.api.nvim_win_get_config(w).relative == "" and vim.wo[w].diff
+    end, vim.api.nvim_tabpage_list_wins(0))
+  end
+  local closed = false
+  for _, win in ipairs(diff_wins()) do
+    -- only while a partner window remains, so the editor area never disappears
+    if vim.api.nvim_win_get_buf(win) == n and #diff_wins() > 1 then
+      closed = pcall(vim.api.nvim_win_close, win, false) or closed
+    end
+  end
+  local left = diff_wins()
+  if closed and #left == 1 then
+    vim.api.nvim_win_call(left[1], function()
+      vim.cmd("diffoff")
+    end)
+  end
+end
+
+--- Close buffer `n` (asks to save unsaved changes).
+local function close_now(n)
+  if vim.api.nvim_buf_is_valid(n) then
+    leave_diff(n)
+  end
+  -- closing the window may already have wiped it (e.g. the gitsigns HEAD version)
+  if vim.api.nvim_buf_is_valid(n) and vim.bo[n].buflisted then
+    Snacks.bufdelete(n)
+  end
+end
+
+--- Scheduled: running it inside the tabline's click callback leaves the tab bar half-redrawn.
 local function close(n)
   vim.schedule(function()
-    if vim.api.nvim_buf_is_valid(n) then
-      Snacks.bufdelete(n)
-    end
+    close_now(n)
     vim.cmd.redrawtabline()
   end)
 end
@@ -103,9 +134,7 @@ _G.IdeTabMenu = function(action)
   local idx = vim.fn.index(ids, n) + 1
   local function close_all(list)
     for _, id in ipairs(list) do
-      if vim.api.nvim_buf_is_valid(id) then
-        Snacks.bufdelete(id)
-      end
+      close_now(id)
     end
     vim.cmd.redrawtabline()
   end
