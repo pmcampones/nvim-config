@@ -6,6 +6,28 @@
 --
 -- Or remove existing autocmds by their group name (which is prefixed with `lazyvim_` for the defaults)
 -- e.g. vim.api.nvim_del_augroup_by_name("lazyvim_wrap_spell")
+-- Terminals: keys only reach the program (e.g. Claude Code's 1/2/3 menus, Enter, Esc) in
+-- Terminal mode, but a mouse click or switching windows drops you into Normal mode. Go back
+-- into Terminal mode automatically when entering a terminal window or clicking inside it.
+-- (A mouse drag still selects text: that ends in Visual mode, which is left alone.)
+local function term_insert()
+  if vim.bo.buftype == "terminal" and vim.fn.mode() == "n" and vim.fn.jobwait({ vim.bo.channel }, 0)[1] == -1 then
+    vim.cmd.startinsert()
+  end
+end
+vim.api.nvim_create_autocmd({ "WinEnter", "BufEnter" }, {
+  group = vim.api.nvim_create_augroup("ide_term_autoinsert", { clear = true }),
+  callback = function()
+    vim.schedule(term_insert)
+  end,
+})
+vim.keymap.set("n", "<LeftRelease>", function()
+  if vim.bo.buftype == "terminal" then
+    vim.schedule(term_insert)
+  end
+  return "<LeftRelease>"
+end, { expr = true, desc = "Click in a terminal: back to Terminal mode" })
+
 -- closing a buffer never leaves two windows showing the same file (lua/ide/bufclose.lua)
 require("ide.bufclose").setup()
 -- `nvim .` (or plain `nvim`) starts with an empty, unnamed buffer that stays as a tab.
