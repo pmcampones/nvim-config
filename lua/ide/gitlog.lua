@@ -1124,7 +1124,9 @@ _G.IdeGitLogWinbar = function()
       push = "%#IdeGitLogBranch#%@v:lua.IdeGitLogPush@" .. label .. "%X%*"
     end
   end
-  return left .. "%=" .. push .. "%#Special#%@v:lua.IdeGitLogRefresh@ ⟳ Refresh %X%*"
+  local refresh = S.fetching and "%#IdeGitLogDim# ⟳ Fetching… %*"
+    or "%#Special#%@v:lua.IdeGitLogRefresh@ ⟳ Refresh %X%*"
+  return left .. "%=" .. push .. refresh
 end
 
 _G.IdeGitLogPush = function()
@@ -1288,6 +1290,36 @@ function M.refresh()
   render_details()
 end
 
+--- Refresh button / R: show the local state right away, then fetch from the remotes in the
+--- background (so new remote commits and the ⇡ Push count show up) and refresh again.
+function M.refresh_remote()
+  M.refresh()
+  if not M.is_open() or S.fetching then
+    return
+  end
+  S.fetching = true
+  vim.cmd.redrawstatus({ bang = true })
+  local root = S.root
+  vim.system({ "git", "fetch", "--all", "--prune", "--quiet" }, {
+    cwd = root,
+    text = true,
+    env = { GIT_TERMINAL_PROMPT = "0" }, -- never hang waiting for credentials
+  }, function(res)
+    vim.schedule(function()
+      S.fetching = false
+      if S.root ~= root then
+        return
+      end
+      if res.code ~= 0 then
+        vim.notify("Could not fetch from the remote (showing local data):\n" .. vim.trim(res.stderr or ""),
+          vim.log.levels.WARN, { title = "Git Log" })
+      end
+      M.refresh()
+      vim.cmd.redrawstatus({ bang = true })
+    end)
+  end)
+end
+
 --------------------------------------------------------------------------------
 -- Panel
 --------------------------------------------------------------------------------
@@ -1308,7 +1340,7 @@ function M.close()
 end
 
 _G.IdeGitLogRefresh = function()
-  vim.schedule(M.refresh)
+  vim.schedule(M.refresh_remote)
 end
 _G.IdeGitLogClose = function()
   vim.schedule(M.close)
@@ -1391,7 +1423,7 @@ function M.open(dir)
   for _, buf in ipairs({ S.list_buf, S.files_buf, S.det_buf }) do
     vim.keymap.set("n", "q", M.close, { buffer = buf, nowait = true, desc = "Close Git Log" })
     vim.keymap.set("n", "y", M.copy_hash, { buffer = buf, nowait = true, desc = "Copy commit hash" })
-    vim.keymap.set("n", "R", M.refresh, { buffer = buf, nowait = true, desc = "Refresh" })
+    vim.keymap.set("n", "R", M.refresh_remote, { buffer = buf, nowait = true, desc = "Refresh (fetch + reload)" })
   end
   local fopts = { buffer = S.files_buf, nowait = true }
   for _, key in ipairs({ "<CR>", "l", "o", "<2-LeftMouse>" }) do
